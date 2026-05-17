@@ -1,0 +1,7 @@
+spring:
+  application:
+    name: notification
+  profiles:
+    active: local
+  jpa:
+    open-in-view: false
