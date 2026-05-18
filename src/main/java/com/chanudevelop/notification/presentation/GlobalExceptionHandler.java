@@ -8,6 +8,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
@@ -49,6 +50,22 @@ public class GlobalExceptionHandler {
                         ErrorCode.VALIDATION_ERROR.getDefaultMessage(),
                         request.getRequestURI(),
                         fieldErrors
+                ));
+    }
+
+    /**
+     * 필수 헤더 누락 (예: X-User-Id 미전송). 400 응답.
+     */
+    @ExceptionHandler(MissingRequestHeaderException.class)
+    public ResponseEntity<ErrorResponse> handleMissingHeader(
+            MissingRequestHeaderException e, HttpServletRequest request) {
+        log.debug("missing header: {}", e.getHeaderName());
+        return ResponseEntity
+                .status(HttpStatus.BAD_REQUEST)
+                .body(ErrorResponse.of(
+                        ErrorCode.INVALID_REQUEST.getCode(),
+                        "Missing required header: " + e.getHeaderName(),
+                        request.getRequestURI()
                 ));
     }
 

@@ -1,13 +1,22 @@
 package com.chanudevelop.notification.application;
 
 import com.chanudevelop.notification.application.dto.NotificationCreateRequest;
+import com.chanudevelop.notification.application.dto.NotificationDetailResponse;
+import com.chanudevelop.notification.application.dto.NotificationListItem;
 import com.chanudevelop.notification.application.dto.NotificationResponse;
+import com.chanudevelop.notification.application.dto.PageResponse;
 import com.chanudevelop.notification.domain.Notification;
+import com.chanudevelop.notification.domain.exception.NotificationNotFoundException;
 import com.chanudevelop.notification.infrastructure.persistence.NotificationRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.UUID;
 
 @Slf4j
 @Service
@@ -33,7 +42,6 @@ public class NotificationService {
      * @see com.chanudevelop.notification.domain.Notification#create
      */
     public NotificationResponse create(NotificationCreateRequest request) {
-        // 1. Notification 객체 생성
         Notification candidate = Notification.create(
                 request.recipientId(),
                 request.type(),
@@ -43,15 +51,12 @@ public class NotificationService {
         );
 
         try {
-            // 2. 알림 저장(중복 요청 처리 고려)
             Notification saved = notificationRepository.saveAndFlush(candidate);
             log.debug("notification created: id={}, key={}",
                     saved.getId(), saved.getIdempotencyKey());
             return NotificationResponse.of(saved, false);
 
         } catch (DataIntegrityViolationException e) {
-            // UNIQUE 위반 = 이미 같은 idempotency_key가 존재. 기존 행 반환.
-            // 위 save 트랜잭션은 이미 rollback됨 → 아래 find는 새 트랜잭션에서 동작.
             Notification existing = notificationRepository
                     .findByIdempotencyKey(candidate.getIdempotencyKey())
                     .orElseThrow(() -> new IllegalStateException(
@@ -62,5 +67,34 @@ public class NotificationService {
                     existing.getId(), existing.getIdempotencyKey());
             return NotificationResponse.of(existing, true);
         }
+    }
+
+    /**
+     * 알림 상세 조회. 없으면 NotificationNotFoundException 발생 (GlobalExceptionHandler가 404로 변환).
+     */
+    @Transactional(readOnly = true)
+    public NotificationDetailResponse getDetail(UUID id) {
+        Notification notification = notificationRepository.findById(id)
+                .orElseThrow(() -> new NotificationNotFoundException(id));
+        return NotificationDetailResponse.of(notification);
+    }
+
+    /**
+     * 본인 알림 목록 조회 (ADR-011 비즈니스 룰).
+     *
+     * <p>"받은 알림" = {@code status = SENT} + {@code channel = IN_APP}.
+     * <p>읽음 필터:
+     * <ul>
+     *   <li>{@code read=null}: 전체</li>
+     *   <li>{@code read=true}: 읽은 것만 (readAt IS NOT NULL)</li>
+     *   <li>{@code read=false}: 안 읽은 것만 (readAt IS NULL)</li>
+     * </ul>
+     */
+    @Transactional(readOnly = true)
+    public PageResponse<NotificationListItem> getMyNotifications(
+            String recipientId, Boolean read, Pageable pageable) {
+        Page<Notification> page = notificationRepository
+                .findReceivedInAppByRecipient(recipientId, read, pageable);
+        return PageResponse.of(page, NotificationListItem::of);
     }
 }

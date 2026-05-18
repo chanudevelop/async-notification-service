@@ -110,5 +110,47 @@ Content-Type: application/json
 
 
 ###
+### [Phase 5] 알림 상세 조회 — 시스템 간 호출 (인증 미사용)
+### {id}는 등록 API 응답에서 받은 id로 교체
+GET {{host}}/notifications/34d029f0-526a-471b-8f22-2c5f819e1359
+
+
+###
+### [Phase 5] 알림 상세 조회 — 존재하지 않는 ID
+### 기대 응답: 404 + ErrorResponse
+GET {{host}}/notifications/00000000-0000-0000-0000-000000000000
+
+
+###
+### [Phase 5] 본인 알림 목록 조회 — 전체 (X-User-Id 헤더 필수)
+GET {{host}}/notifications/me
+X-User-Id: verify-user-001
+
+
+###
+### [Phase 5] 본인 알림 목록 — 안 읽은 것만
+GET {{host}}/notifications/me?read=false
+X-User-Id: verify-user-001
+
+
+###
+### [Phase 5] 본인 알림 목록 — 읽은 것만
+GET {{host}}/notifications/me?read=true
+X-User-Id: verify-user-001
+
+
+###
+### [Phase 5] 본인 알림 목록 — 페이지네이션 (page=0, size=2)
+GET {{host}}/notifications/me?page=0&size=2
+X-User-Id: verify-user-001
+
+
+###
+### [Phase 5] 본인 알림 목록 — X-User-Id 헤더 누락
+### 기대 응답: 400 + INVALID_REQUEST
+GET {{host}}/notifications/me
+
+
+###
 ### Swagger UI
 ### 브라우저에서: http://localhost:8080/swagger-ui.html
