@@ -42,6 +42,27 @@ public interface NotificationRepository extends JpaRepository<Notification, UUID
     List<Notification> findPendingForUpdate(@Param("batchSize") int batchSize);
 
     /**
+     * 재시도 워커가 FAILED 알림을 클레임하기 위한 폴링 쿼리.
+     *
+     * <p>{@code FOR UPDATE SKIP LOCKED}로 다중 인스턴스 환경에서도 안전.
+     * retryCount vs maxRetry 분기는 자바 코드의 {@code canBeRetried()} 도메인 메서드에서 처리한다
+     * (Rich Domain Model 일관성 — ADR-013 Sub-Decision 4).
+     *
+     * <p>호출자는 반드시 {@code @Transactional} 안에서 호출해야 한다.
+     *
+     * @param batchSize 한 번에 가져올 최대 알림 수
+     * @return FAILED 상태 알림 목록 (failed_at 오름차순)
+     */
+    @Query(value = """
+            SELECT * FROM notifications
+             WHERE status = 'FAILED'
+             ORDER BY failed_at
+             FOR UPDATE SKIP LOCKED
+             LIMIT :batchSize
+            """, nativeQuery = true)
+    List<Notification> findFailedReadyForRetry(@Param("batchSize") int batchSize);
+
+    /**
      * 사용자가 받은 IN_APP 알림 목록 조회 (비즈니스 룰: SENT + IN_APP, ADR-011).
      *
      * <p>읽음 필터:
