@@ -1,0 +1,114 @@
+### ====================================================================
+### Async Notification Service — IntelliJ HTTP Client 테스트 파일
+### ====================================================================
+### 사용법:
+###   각 요청 위의 ▶ 초록 화살표 클릭으로 실행.
+###   서버가 띄워져 있어야 함 (./gradlew bootRun)
+### ====================================================================
+
+@host = http://localhost:8080
+
+###
+### Actuator: 헬스 체크
+GET {{host}}/actuator/health
+
+
+###
+### [Phase 4] 알림 등록 — 정상 케이스
+POST {{host}}/notifications
+Content-Type: application/json
+
+{
+  "recipientId": "user-001",
+  "type": "ENROLLMENT_COMPLETED",
+  "channel": "EMAIL",
+  "referenceId": "enrollment-123",
+  "payload": {
+    "studentName": "김철수",
+    "courseName": "Spring Boot 입문"
+  }
+}
+
+
+###
+### [Phase 4] 멱등성 테스트 — 위와 100% 동일한 요청
+### 기대 응답: 같은 id, isDuplicate: true
+POST {{host}}/notifications
+Content-Type: application/json
+
+{
+  "recipientId": "user-001",
+  "type": "ENROLLMENT_COMPLETED",
+  "channel": "EMAIL",
+  "referenceId": "enrollment-123",
+  "payload": {
+    "studentName": "김철수",
+    "courseName": "Spring Boot 입문"
+  }
+}
+
+
+###
+### [Phase 4] 다른 채널 (IN_APP) — 같은 enrollment에 대해 다른 알림
+### 기대 응답: 새 id, isDuplicate: false
+POST {{host}}/notifications
+Content-Type: application/json
+
+{
+  "recipientId": "user-001",
+  "type": "ENROLLMENT_COMPLETED",
+  "channel": "IN_APP",
+  "referenceId": "enrollment-123",
+  "payload": {
+    "studentName": "김철수",
+    "courseName": "Spring Boot 입문"
+  }
+}
+
+
+###
+### [Phase 4] 다른 type — 결제 완료 알림
+POST {{host}}/notifications
+Content-Type: application/json
+
+{
+  "recipientId": "user-001",
+  "type": "PAYMENT_CONFIRMED",
+  "channel": "EMAIL",
+  "referenceId": "payment-456",
+  "payload": {
+    "amount": "50000"
+  }
+}
+
+
+###
+### [Phase 4] Validation 실패 — recipientId 누락
+### 기대 응답: 400 Bad Request
+POST {{host}}/notifications
+Content-Type: application/json
+
+{
+  "type": "ENROLLMENT_COMPLETED",
+  "channel": "EMAIL",
+  "referenceId": "enrollment-999"
+}
+
+
+###
+### [Phase 4] Validation 실패 — 빈 문자열
+### 기대 응답: 400 Bad Request
+POST {{host}}/notifications
+Content-Type: application/json
+
+{
+  "recipientId": "",
+  "type": "ENROLLMENT_COMPLETED",
+  "channel": "EMAIL",
+  "referenceId": "enrollment-999"
+}
+
+
+###
+### Swagger UI
+### 브라우저에서: http://localhost:8080/swagger-ui.html
