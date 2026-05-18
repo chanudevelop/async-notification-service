@@ -5,3 +5,8 @@ spring:
     active: local
   jpa:
     open-in-view: false
+
+notification:
+  worker:
+    batch-size: 10
+    polling-interval-ms: 1000
