@@ -10,3 +10,11 @@ notification:
   worker:
     batch-size: 10
     polling-interval-ms: 1000
+  retry:
+    enabled: true
+    polling-interval-ms: 5000
+    batch-size: 20
+    base-delay-seconds: 10
+    multiplier: 2
+    max-delay-seconds: 300
+    jitter-seconds: 5

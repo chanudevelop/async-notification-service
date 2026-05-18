@@ -23,6 +23,14 @@ notification:
     enabled: false
     batch-size: 10
     polling-interval-ms: 3600000
+  retry:
+    enabled: false
+    polling-interval-ms: 3600000
+    batch-size: 20
+    base-delay-seconds: 10
+    multiplier: 2
+    max-delay-seconds: 300
+    jitter-seconds: 5
 
 logging:
   level:
