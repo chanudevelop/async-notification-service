@@ -1,6 +1,6 @@
 # Notification 상태 머신
 
-본 문서는 알림 한 건이 시스템 내에서 거치는 생애주기와 전이 규칙을 정의한다.
+알림 한 건이 등록부터 종착까지 거치는 상태와 전이 규칙을 정리합니다. 5개 상태(PENDING / PROCESSING / SENT / FAILED / DEAD_LETTER)와 도메인 메서드 기반 전이로 구현했습니다.
 
 ---
 
@@ -78,8 +78,10 @@ stateDiagram-v2
 ```
 [API 요청] → PENDING
 [워커 클레임 1차] → PROCESSING → [SMTP 일시 장애] → FAILED (retry_count=1)
-   ↓ 백오프 대기
-[next_attempt_at 도달] → PENDING
+   ↓ RetryProcessor 5초 후 폴링
+   ↓ 백오프 계산: 10초 + jitter(0~5초) = 10~15초
+[scheduleRetry: PENDING, next_attempt_at = 미래 시각]
+   ↓ next_attempt_at 도달 후 발송 워커 폴링
 [워커 클레임 2차] → PROCESSING → [발송 성공] → SENT
 ```
 
@@ -87,21 +89,31 @@ stateDiagram-v2
 
 ```
 [API 요청] → PENDING → PROCESSING → FAILED (retry_count=1)
-   → 백오프 → PENDING → PROCESSING → FAILED (retry_count=2)
-   → ... 반복 ...
+   → 백오프 10~15초 → PENDING → PROCESSING → FAILED (retry_count=2)
+   → 백오프 20~25초 → ... (백오프 매번 2배 증가)
    → PROCESSING → FAILED (retry_count=5 = max_retry)
-   → DEAD_LETTER (운영자 개입 필요)
+   → RetryProcessor가 canBeRetried() false 판단
+   → moveToDeadLetter → DEAD_LETTER (자동 처리 종료)
 ```
+
+자세한 백오프 공식과 파라미터는 [async-design.md](./async-design.md#재시도-정책--exponential-backoff--jitter) 참조.
 
 ### 시나리오 D: 워커 크래시 (Stuck 복구)
 
 ```
 [API 요청] → PENDING → PROCESSING (worker_id=W1, claimed_at=10:00)
-[워커 W1 크래시 — claimed_at 그대로 멈춤]
-[Reaper가 10:05에 스캔] → claimed_at가 임계값(5분) 초과
-[PROCESSING → PENDING 복구, worker_id 리셋]
-[다른 워커가 다시 처리] → ...
+[워커 W1 프로세스 죽음 — OOM/k8s evicted/재시작 등]
+   → claimed_at 그대로 멈춤, 어떤 워커도 안 건드림
+       (NotificationProcessor는 PENDING만 보고, RetryProcessor는 FAILED만 봄)
+
+[StuckReaperProcessor가 10:05~10:06 사이 폴링]
+   → idx_stuck_reaper로 PROCESSING + claimed_at < (NOW - 5분) 발견
+[recoverFromStuck → PENDING, worker_id/claimed_at null]
+   → retry_count는 변경 X (인프라 사고와 외부 시스템 사고를 다르게 처리)
+[다른 워커가 다시 폴링해 잡음] → 재발송 시도
 ```
+
+retry_count를 안 건드리는 이유: stuck은 외부 시스템 장애가 아닌 인프라 장애. 재시도 카운트를 증가시키면 인프라가 불안정한 시기에 stuck 누적으로 DEAD_LETTER로 보내져 외부 시스템 한 번도 거치지 않은 알림이 영구 실패 처리되는 사고가 납니다. 자세한 정책 근거는 [async-design.md](./async-design.md#stuck-복구) 참조.
 
 ### 시나리오 E: 운영자 수동 재시도
 
@@ -116,7 +128,7 @@ stateDiagram-v2
 
 ## 5. 구현 방식: 도메인 메서드
 
-상태 머신은 **Java 도메인 메서드 + enum**으로 구현한다. Spring StateMachine 같은 외부 라이브러리는 사용하지 않는다.
+Java 도메인 메서드 + enum으로 구현했습니다. Spring StateMachine 같은 외부 라이브러리는 사용하지 않았습니다. 상태 5개와 단순 전이라 도메인 메서드만으로 충분히 명확하고, 라이브러리는 대출 심사처럼 상태 수십 개 + 복잡한 가드/액션 워크플로에 어울리는 도구입니다.
 
 ```java
 public enum NotificationStatus {
@@ -145,31 +157,38 @@ public class Notification {
 }
 ```
 
-→ 잘못된 전이 시도는 `IllegalStateTransitionException`으로 즉시 차단.
+잘못된 전이 시도는 `ensureStatus()` 가드에서 `IllegalStateTransitionException`으로 즉시 차단합니다. 비즈니스 룰을 도메인 객체에 캡슐화한 Rich Domain Model 패턴.
 
 ---
 
 ## 6. 읽음 처리 (별도 차원)
 
-알림의 "**발송 상태**" 와 "**사용자 읽음**" 은 **별도 차원**이다.
+알림의 "발송 상태"와 "사용자 읽음"은 별도 차원입니다.
 
 - `status`: 시스템의 발송 라이프사이클 (PENDING~DEAD_LETTER)
 - `read_at`: 사용자가 알림 페이지 조회 시 기록되는 timestamp (nullable)
 
-EMAIL은 보통 read_at이 NULL 유지 (외부 클라이언트에서 읽기 때문에 추적 불가). IN_APP은 사용자가 알림 페이지를 열거나 명시적으로 읽음 처리 시 기록된다.
+EMAIL은 보통 `read_at`이 NULL로 유지됩니다 (외부 클라이언트에서 읽기 때문에 추적 불가). IN_APP은 사용자가 알림 페이지를 열거나 명시적으로 읽음 처리 시 기록됩니다.
 
-→ 자세한 근거는 [design-decisions.md](./design-decisions.md#읽음-처리-분리) 참조.
+→ 자세한 근거는 [design-decisions.md](./design-decisions.md) 참조.
 
 ---
 
-## 7. 운영 파라미터
+## 7. 운영 파라미터 (실제 적용된 값)
 
-| 파라미터 | 기본값 | 비고 |
-|---------|--------|------|
-| `max_retry` | 5 | Notification 컬럼, 알림별 override 가능 |
-| Stuck 임계값 | 5분 | claimed_at으로부터 |
-| Reaper 주기 | 1분 | @Scheduled |
-| 워커 폴링 주기 | 1초 | @Scheduled |
-| 재시도 백오프 | 지수 (1m, 5m, 30m, ...) | RetryPolicy 클래스 |
+| 파라미터 | 값 | 컴포넌트 |
+|---------|-----|---------|
+| `max_retry` | 5 | Notification 엔티티 컬럼 (`DEFAULT_MAX_RETRY`) |
+| Stuck 임계값 | 5분 (300초) | `notification.reaper.stuck-threshold-seconds` |
+| StuckReaper 주기 | 1분 | `notification.reaper.polling-interval-ms` |
+| 발송 워커 폴링 주기 | 1초 | `notification.worker.polling-interval-ms` |
+| 재시도 워커 폴링 주기 | 5초 | `notification.retry.polling-interval-ms` |
+| 재시도 백오프 base | 10초 | `notification.retry.base-delay-seconds` |
+| 재시도 백오프 multiplier | 2 | `notification.retry.multiplier` |
+| 재시도 백오프 max | 5분 (300초) | `notification.retry.max-delay-seconds` |
+| 재시도 jitter | 0~5초 | `notification.retry.jitter-seconds` |
+| 발송 배치 크기 | 10 | `notification.worker.batch-size` |
+| 재시도 배치 크기 | 20 | `notification.retry.batch-size` |
+| Reaper 배치 크기 | 50 | `notification.reaper.batch-size` |
 
-→ Phase 7, 8 구현 시 상세 결정.
+모든 파라미터는 `application.yaml`에서 외부화. 운영에서 트래픽 측정 후 코드 수정 없이 조정 가능. 자세한 설명은 [async-design.md](./async-design.md) 참조.

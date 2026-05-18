@@ -1,6 +1,6 @@
 # ERD (Entity Relationship Diagram)
 
-본 문서는 알림 발송 시스템의 데이터 모델을 정의한다.
+알림 발송 시스템의 데이터 모델입니다. 두 개의 테이블 — `notifications`와 `notification_templates`로 구성되어 있고, 둘 사이엔 DB 외래키 없이 논리적 참조 관계만 있습니다 (사유는 아래 설명).
 
 ---
 
@@ -48,7 +48,7 @@ erDiagram
     NOTIFICATIONS ||..o| NOTIFICATION_TEMPLATES : "type+channel+locale로 렌더 시 참조 (FK 없음)"
 ```
 
-> **관계 메모**: `notifications.type`은 `notification_templates.type`을 논리적으로 참조하지만 **DB 외래키는 두지 않는다**. 템플릿은 운영 중 비활성/삭제될 수 있고, 알림은 발송 시점에 이미 렌더된 결과(title/body)를 보관하기 때문에 템플릿 부재가 알림 무결성을 깨지 않는다.
+> **관계 메모**: `notifications.type`은 `notification_templates.type`을 논리적으로 참조하지만 DB 외래키는 일부러 안 뒀습니다. 템플릿은 운영 중 비활성/삭제될 수 있고, 알림은 발송 시점에 이미 렌더된 결과(title/body)를 보관하므로 템플릿이 사라져도 기존 알림의 무결성엔 영향이 없습니다.
 
 ---
 
@@ -83,7 +83,7 @@ erDiagram
 | `idx_pending_polling` | `(next_attempt_at) WHERE status='PENDING'` | 워커 폴링 (Partial) |
 | `idx_stuck_reaper` | `(claimed_at) WHERE status='PROCESSING'` | Stuck Reaper (Partial) |
 
-→ 폴링/Reaper용 인덱스는 **PostgreSQL Partial Index**로 설계해 인덱스 크기를 약 1/100로 줄였다. 자세한 이유는 [design-decisions.md](./design-decisions.md) 참조.
+알림의 99% 이상이 SENT/DEAD_LETTER 종착 상태로 끝납니다. 폴링/Reaper 쿼리가 항상 특정 status로 시작하니까 그 status 행만 인덱싱하는 Partial Index가 적합합니다. 인덱스 크기가 약 1/100로 줄어들어 메모리 캐시 효율 + 쿼리 속도 둘 다 잡힙니다. 자세한 이유는 [design-decisions.md](./design-decisions.md) 참조.
 
 ---
 
@@ -111,36 +111,57 @@ erDiagram
 
 ## 4. 데이터 흐름 (요약)
 
+### 등록 + 정상 발송
+
 ```
 [API: POST /notifications]
+   ↓ 멱등성 키 생성 (recipient_id:type:reference_id:channel)
+[INSERT (status=PENDING, payload, ...)]
+   - UNIQUE 충돌 시 기존 행 반환
    ↓
-[멱등성 키 생성: recipient_id:type:reference_id:channel]
-   ↓
-[notifications INSERT (status=PENDING, payload, ...)]
-   - UNIQUE 충돌 → 기존 행 반환 (멱등 보장)
-   ↓
-[비동기 워커: idx_pending_polling 인덱스로 PENDING 조회]
-   ↓
-[워커가 클레임: status PROCESSING, worker_id, claimed_at]
-   ↓
-[notification_templates 조회 + payload로 렌더]
-   ↓
-[title, body 컬럼 채움 + EMAIL이면 SMTP 호출]
-   ↓
-[성공: status=SENT, sent_at 기록 / 실패: status=FAILED, 재시도 또는 DEAD_LETTER]
+[NotificationProcessor: idx_pending_polling으로 PENDING 폴링]
+   ↓ SKIP LOCKED로 클레임 (status=PROCESSING, worker_id, claimed_at)
+[템플릿 조회 + payload 치환 → 렌더된 title/body]
+   ↓ Dispatcher 호출 (EMAIL은 SMTP, IN_APP은 로그)
+[성공: status=SENT, sent_at + title/body 저장]
+```
 
-[별도 Reaper 스케줄러]
-   ↓
-[idx_stuck_reaper 인덱스로 PROCESSING + 오래 머문 행 조회]
-   ↓
-[PENDING으로 복구]
+### 실패 → 재시도 → DEAD_LETTER
 
-[조회 API: GET /notifications/users/{id}]
+```
+[발송 실패: markAsFailed]
+   → status=FAILED, retry_count++, last_error, failed_at
+
+[RetryProcessor 5초 폴링]
+   ↓ FAILED + retry_count < max_retry ?
+       ├─ YES: 백오프 시각 계산 → scheduleRetry
+       │       → status=PENDING, next_attempt_at=미래시각
+       │       → 시간 경과 후 NotificationProcessor가 다시 폴링
+       │
+       └─ NO:  moveToDeadLetter → status=DEAD_LETTER (자동 처리 종료)
+```
+
+### Stuck 복구
+
+```
+[워커 죽음] PROCESSING 상태로 갇힘
+
+[StuckReaperProcessor 1분 폴링]
+   ↓ idx_stuck_reaper로 PROCESSING + claimed_at < (NOW - 5분) 조회
+[recoverFromStuck: status=PENDING, worker_id/claimed_at null]
    ↓
-[idx_recipient_created 인덱스로 빠른 조회]
-   ↓
+[NotificationProcessor가 다시 폴링해서 잡음]
+```
+
+### 사용자 알림 조회
+
+```
+[GET /notifications/me]
+   ↓ idx_recipient_created로 빠른 조회
 [저장된 title/body 그대로 응답 — 렌더링 없음]
 ```
+
+조회 시 렌더링을 다시 안 하는 이유는 발송 시점에 렌더된 결과를 `notifications.title/body`에 저장해 두었기 때문입니다 (Hybrid 패턴). 템플릿이 운영 중 변경되더라도 사용자가 받았던 알림은 발송 시점 그대로 유지됩니다.
 
 ---
 

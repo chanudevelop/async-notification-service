@@ -1,6 +1,6 @@
 # Design Decisions
 
-본 문서는 알림 발송 시스템 설계의 주요 결정과 그 근거를 정리한다. 평가자가 본 시스템의 사고 흐름을 빠르게 파악할 수 있도록 핵심만 추린다.
+주요 설계 결정과 근거를 정리합니다. 선택지를 어떻게 좁혔는지, 왜 다른 옵션을 기각했는지, 어떤 트레이드오프를 감수했는지를 짧게 정리하고, 자세한 동작은 다른 문서로 연결합니다.
 
 ---
 
@@ -152,40 +152,91 @@
 
 ---
 
-## 7. 비동기 처리: DB 폴링 기반 (Outbox 풍)
+## 7. 비동기 처리: DB 폴링 + SKIP LOCKED + 트랜잭션 분리
 
 ### 결정
-- 알림은 `notifications` 테이블에 PENDING 상태로 저장
-- 별도 워커가 `@Scheduled`로 주기적 폴링 → 클레임 → 발송
-- 메시지 브로커(Kafka 등) 미사용
+- 알림은 `notifications` 테이블에 PENDING 상태로 INSERT 후 즉시 `202 Accepted` 응답
+- 별도 `NotificationProcessor` 워커가 `@Scheduled`로 1초마다 PENDING 폴링
+- 클레임 시 PostgreSQL `SELECT FOR UPDATE SKIP LOCKED` 사용
+- 트랜잭션을 두 단계로 분리: 클레임 (`claimPending`) / 발송 (`processOne`)
 
-### 왜 이 구조인가
-- **재시작 안전**: 상태가 DB에 영구 저장돼 서버 재시작 후에도 손실 없음
-- **트랜잭션 분리**: 알림 등록 API는 INSERT 후 즉시 응답 (비즈니스 트랜잭션 영향 X)
-- **다중 인스턴스 안전**: DB의 조건부 UPDATE / `SKIP LOCKED`로 클레임 → 1행 1워커
-- **메시지 브로커 없이도 운영 가능**: 본 과제 요구사항 부합
+### 왜 두 단계로 분리했나
+한 트랜잭션으로 묶으면 외부 시스템 호출이 트랜잭션 안에 있어 DB 락이 외부 응답 시간만큼 잡힙니다. SMTP가 5초 걸리면 락도 5초 → 다른 워커 처리량 ↓.
 
-### 운영 환경 전환 경로 (인터페이스 추상화)
-- `NotificationDispatcher` 인터페이스로 발송 로직 추상화
-- 현재: `DbPollingDispatcher` (구현체)
-- 향후 트래픽 증가 시: `KafkaDispatcher` 같은 구현체로 교체 가능 — 비즈니스 코드 영향 없음
+분리하면 클레임은 짧게 commit해서 PROCESSING 상태가 즉시 영구화되고, 발송은 별도 트랜잭션에서 외부 시스템 호출. 알림 1건당 별도 트랜잭션이라 한 건 실패가 다른 건에 영향 X.
 
-자세한 내용은 [async-design.md](./async-design.md) (Phase 12에서 작성 예정) 참조.
+### Spring AOP self-invocation 회피
+두 트랜잭션 메서드를 묶어 호출하는 책임은 `NotificationProcessor` 워커가 가집니다. 같은 클래스 안에서 `@Transactional` 메서드를 호출하면 AOP proxy가 인터셉트 못해 트랜잭션이 적용 안 되는 함정이 있어, 외부 클래스에서 호출하는 구조로 분리.
+
+### SKIP LOCKED 선택 이유
+다중 인스턴스 환경에서 동시 폴링 시 락 충돌이 발생합니다. 일반 `FOR UPDATE`는 락 풀릴 때까지 대기 → 처리량 ↓. `SKIP LOCKED`는 충돌 시 그냥 다음 행 보러 가서 처리량 유지. 본 과제 평가 기준 "다중 인스턴스 중복 처리 방지" + "비동기 처리 구조" 둘 다 만족.
+
+### 채널 추상화로 운영 전환 경로 확보
+`NotificationDispatcher` 인터페이스 + `EmailDispatcher` / `InAppDispatcher` 구현체 (Strategy + 헥사고날 Port/Adapter). 미래에 SMTP 클라이언트나 메시지 브로커 통합 시 인터페이스는 그대로 유지하고 구현체만 교체.
+
+자세한 비동기 구조는 [async-design.md](./async-design.md) 참조.
 
 ---
 
-## 8. 재시도 정책: 지수 백오프 (Exponential Backoff)
+## 8. 재시도 정책: Exponential Backoff + Jitter
 
-### 결정 (잠정 — Phase 7에서 확정)
-- 최대 재시도: 5회
-- 백오프 간격: 1분 → 5분 → 30분 → 2시간 → 6시간
-- 최대 재시도 초과 시 `DEAD_LETTER` 상태로 전이 (운영자 개입 필요)
+### 결정
+- 최대 재시도: 5회 (`DEFAULT_MAX_RETRY = 5`)
+- 백오프 공식: `delay = min(base × multiplier^(retryCount-1), max) + random(0, jitter)`
+- 파라미터: base=10초, multiplier=2, max=300초, jitter=0~5초
+- 한계 초과 시 `DEAD_LETTER` 자동 전이 (운영자 수동 재시도 대상)
+- 별도 `RetryProcessor` 워커가 5초마다 FAILED 폴링
 
-### 왜 지수 백오프인가
-- 외부 SMTP 서버 장애 시 짧은 간격 재시도는 부하만 가중
-- 점점 길어지는 간격으로 외부 서버에 회복 시간 부여
+### 계산 예시
 
-자세한 정책은 Phase 7에서 RetryPolicy 클래스 구현 시 확정.
+| retryCount | 백오프 |
+|-----------|--------|
+| 1 | 10~15초 |
+| 2 | 20~25초 |
+| 3 | 40~45초 |
+| 4 | 80~85초 |
+| 5 | 160~165초 |
+| 6+ | DEAD_LETTER |
+
+### 왜 Exponential인가
+외부 시스템 일시 장애 시 즉시 재시도하면 같은 실패를 반복하며 외부 시스템 회복을 방해합니다 (thundering herd). 매 시도마다 대기를 2배로 늘려 외부 시스템에 충분한 회복 시간을 제공.
+
+### 왜 Jitter가 추가로 필요한가
+Exponential만 적용하면 동시에 실패한 N건이 정확히 같은 시각에 재시도됩니다. Jitter는 재시도 시각에 0~5초 랜덤을 더해 분산, 외부 시스템에 부드러운 부하만 가합니다. AWS SDK / Resilience4j 같은 표준 라이브러리와 동일 패턴.
+
+### 워커 분리 이유 (RetryProcessor)
+NotificationProcessor가 PENDING+FAILED 둘 다 처리하지 않고 RetryProcessor를 별도 워커로 둔 이유:
+- SRP — 발송과 재시도 정책이 다른 책임
+- 폴링 주기 다르게 가능 (발송 1초 / 재시도 5초)
+- 운영에서 한쪽만 끄기 가능 (`@ConditionalOnProperty`)
+- 발송 워커 코드가 비대해지지 않음
+
+자세한 정책은 [async-design.md](./async-design.md#재시도-정책--exponential-backoff--jitter) 참조.
+
+---
+
+## 9. Stuck 복구: 별도 Reaper 워커 + 5분 임계값
+
+### 결정
+- 별도 `StuckReaperProcessor` 워커가 1분마다 폴링
+- `WHERE status='PROCESSING' AND claimed_at < NOW() - 5분`
+- 발견 시 `recoverFromStuck()` 도메인 메서드 호출 → PENDING으로 되돌림
+- `retry_count`는 변경 없음 (인프라 사고와 외부 시스템 사고 정책 분리)
+
+### 왜 별도 워커인가
+세 워커가 각자 다른 status만 보는 구조 — NotificationProcessor는 PENDING, RetryProcessor는 FAILED, StuckReaperProcessor는 PROCESSING. 어떤 알림도 동시에 두 워커에 잡힐 일이 없습니다. SRP + 운영 시 따로 끄기 가능 + 폴링 주기 분리 가치.
+
+### 임계값 5분의 근거
+- 외부 시스템(SMTP, HTTP) 일반 timeout이 30초~2분 범위
+- 5분이면 "이건 분명히 죽었다"고 단정 가능한 안전 마진
+- 너무 짧으면(예: 30초) 살아있는 워커의 작업을 가로채 중복 발송 사고
+- 너무 길면(예: 1시간) 사용자 체감 지연 ↑
+- application.yaml에 외부화 (`notification.reaper.stuck-threshold-seconds: 300`) — 운영 P99 측정 후 조정
+
+### retry_count를 안 건드리는 이유
+Stuck은 워커 프로세스가 죽은 인프라 사고지 외부 시스템 사고가 아닙니다. retry_count를 증가시키면 인프라가 불안정한 시기에 stuck이 누적되다 DEAD_LETTER로 보내져 외부 시스템 한 번도 거치지 않은 알림이 영구 실패 처리되는 사고가 납니다. 외부 시스템 실패는 markAsFailed에서만 retry_count를 증가시키는 정책 분리.
+
+자세한 동작은 [async-design.md](./async-design.md#stuck-복구) 참조.
 
 ---
 
@@ -199,5 +250,8 @@
 | 메시지 페이로드 | Hybrid 패턴 — payload + 렌더된 title/body + 템플릿 테이블 |
 | type / channel | enum + @Enumerated(STRING) |
 | 인덱스 | Partial Index 활용 (PostgreSQL 특화) |
-| 비동기 처리 | DB 폴링 + 인터페이스 추상화 (브로커 교체 가능) |
+| 비동기 처리 | DB 폴링 + SKIP LOCKED + 트랜잭션 두 단계 분리 + 채널 추상화 |
+| 재시도 정책 | Exponential Backoff + Jitter, 최대 5회, DEAD_LETTER 자동 전이 |
+| Stuck 복구 | 별도 Reaper 워커, 5분 임계값, retry_count 변경 없음 |
+| 워커 책임 분리 | 세 워커가 PENDING / FAILED / PROCESSING 각각 담당 |
 | 읽음 처리 | status와 분리된 readAt 컬럼 |
