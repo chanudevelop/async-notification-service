@@ -17,7 +17,8 @@ public enum ErrorCode {
     INVALID_STATUS_TRANSITION(HttpStatus.CONFLICT, "INVALID_STATUS_TRANSITION", "Invalid state transition"),
 
     // 500 Internal Server Error
-    INTERNAL_ERROR(HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Internal server error");
+    INTERNAL_ERROR(HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Internal server error"),
+    TEMPLATE_RENDER_ERROR(HttpStatus.INTERNAL_SERVER_ERROR, "TEMPLATE_RENDER_ERROR", "Template rendering failed");
 
     private final HttpStatus httpStatus;
     private final String code;
