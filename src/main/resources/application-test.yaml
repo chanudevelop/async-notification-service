@@ -14,6 +14,16 @@ management:
       exposure:
         include: health
 
+# 테스트 환경에서는 NotificationProcessor 빈 자체를 비활성화한다.
+# @Scheduled는 fixedDelay 설정과 무관하게 빈 등록 직후 1회 트리거되므로 (TS-006 참조),
+# notification.worker.enabled=false로 @ConditionalOnProperty가 빈 등록 자체를 막아야 안전.
+# 테스트는 ProcessingService 메서드를 직접 호출해 워커 흐름을 검증한다.
+notification:
+  worker:
+    enabled: false
+    batch-size: 10
+    polling-interval-ms: 3600000
+
 logging:
   level:
     root: WARN
