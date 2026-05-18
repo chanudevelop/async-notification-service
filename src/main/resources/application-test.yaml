@@ -31,6 +31,11 @@ notification:
     multiplier: 2
     max-delay-seconds: 300
     jitter-seconds: 5
+  reaper:
+    enabled: false
+    polling-interval-ms: 3600000
+    stuck-threshold-seconds: 300
+    batch-size: 50
 
 logging:
   level:

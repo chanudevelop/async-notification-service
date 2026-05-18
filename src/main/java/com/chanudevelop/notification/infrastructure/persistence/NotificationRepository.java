@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -61,6 +62,33 @@ public interface NotificationRepository extends JpaRepository<Notification, UUID
              LIMIT :batchSize
             """, nativeQuery = true)
     List<Notification> findFailedReadyForRetry(@Param("batchSize") int batchSize);
+
+    /**
+     * Stuck Reaper가 PROCESSING 갇힌 알림을 복구하기 위한 폴링 쿼리.
+     *
+     * <p>{@code claimed_at < threshold} 조건으로 일정 시간 이상 갇힌 알림만 잡는다.
+     * threshold는 호출자가 {@code LocalDateTime.now().minusSeconds(stuckThresholdSeconds)}로 계산해 전달.
+     *
+     * <p>{@code FOR UPDATE SKIP LOCKED}로 다중 Reaper 인스턴스 환경에서도 안전.
+     *
+     * <p>Partial Index {@code idx_stuck_reaper} 활용 (V1 마이그레이션 참조).
+     *
+     * @param threshold 이 시각 이전에 claim된 알림만 stuck으로 간주
+     * @param batchSize 한 번에 가져올 최대 알림 수
+     * @return Stuck 상태 알림 목록 (claimed_at 오름차순)
+     */
+    @Query(value = """
+            SELECT * FROM notifications
+             WHERE status = 'PROCESSING'
+               AND claimed_at < :threshold
+             ORDER BY claimed_at
+             FOR UPDATE SKIP LOCKED
+             LIMIT :batchSize
+            """, nativeQuery = true)
+    List<Notification> findStuckForRecovery(
+            @Param("threshold") LocalDateTime threshold,
+            @Param("batchSize") int batchSize
+    );
 
     /**
      * 사용자가 받은 IN_APP 알림 목록 조회 (비즈니스 룰: SENT + IN_APP, ADR-011).
