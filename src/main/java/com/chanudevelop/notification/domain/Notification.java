@@ -1,5 +1,6 @@
 package com.chanudevelop.notification.domain;
 
+import com.chanudevelop.notification.domain.exception.IllegalStateTransitionException;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -171,7 +172,7 @@ public class Notification extends BaseEntity {
     public void scheduleRetry(LocalDateTime nextAttemptAt) {
         ensureStatus(NotificationStatus.FAILED, "scheduleRetry");
         if (!canBeRetried()) {
-            throw new IllegalStateException(
+            throw new IllegalStateTransitionException(
                     "Cannot schedule retry: max retry exceeded (" + retryCount + "/" + maxRetry + ")");
         }
         Objects.requireNonNull(nextAttemptAt, "nextAttemptAt must not be null");
@@ -218,8 +219,7 @@ public class Notification extends BaseEntity {
 
     private void ensureStatus(NotificationStatus expected, String action) {
         if (this.status != expected) {
-            throw new IllegalStateException(
-                    "Cannot " + action + " from status: " + this.status + " (expected: " + expected + ")");
+            throw new IllegalStateTransitionException(this.status, expected, action);
         }
     }
 }

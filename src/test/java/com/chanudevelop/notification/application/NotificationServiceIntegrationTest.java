@@ -212,4 +212,29 @@ class NotificationServiceIntegrationTest {
 
         assertThat(notificationRepository.count()).isZero();
     }
+
+    @Test
+    @DisplayName("Validation 실패 시 에러 응답이 code/message/path/timestamp/errors 형식을 따른다")
+    void validation_error_response_format() throws Exception {
+        String requestBody = """
+            {
+              "recipientId": "",
+              "type": "ENROLLMENT_COMPLETED",
+              "channel": "EMAIL",
+              "referenceId": "enrollment-123"
+            }
+            """;
+
+        mockMvc.perform(post("/notifications")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(requestBody))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.message").exists())
+                .andExpect(jsonPath("$.path").value("/notifications"))
+                .andExpect(jsonPath("$.timestamp").exists())
+                .andExpect(jsonPath("$.errors").isArray())
+                .andExpect(jsonPath("$.errors[0].field").value("recipientId"))
+                .andExpect(jsonPath("$.errors[0].message").exists());
+    }
 }
