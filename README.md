@@ -114,7 +114,7 @@ curl http://localhost:8080/actuator/health
 ./gradlew test
 ```
 
-Testcontainers가 PostgreSQL 16 컨테이너를 자동으로 띄워 통합 테스트 38개를 돌립니다.
+Testcontainers가 PostgreSQL 16 컨테이너를 자동으로 띄워 통합 테스트 40개를 돌립니다.
 
 ---
 
@@ -333,15 +333,18 @@ CREATE INDEX idx_stuck_reaper
 ./gradlew test
 ```
 
-통합 테스트 **38개** 모두 통과:
+통합 테스트 **40개** 모두 통과:
 - Application bootstrap (1)
 - 알림 등록 API + 멱등성 (7)
 - 조회 API + 비즈니스 룰 (14)
 - 발송 워커 (6)
 - 재시도 + DEAD_LETTER (5)
 - Stuck Reaper (5)
+- **동시성 자동 검증** (2) — 멱등성 100 동시 요청 + SKIP LOCKED 다중 워커 클레임
 
 모든 통합 테스트는 Testcontainers로 실제 PostgreSQL 16 컨테이너에서 실행됩니다. H2 in-memory 대신 실제 DB를 쓰는 이유는 Partial Index, `SKIP LOCKED`, JSONB 같은 PostgreSQL 특화 기능이 운영과 동일하게 동작하는지 검증해야 하기 때문입니다.
+
+동시성 자동 테스트(`ConcurrencyIntegrationTest`)는 `ExecutorService` + `CountDownLatch` 패턴으로 같은 멱등성 키를 100개 스레드가 동시에 요청해도 DB UNIQUE 제약 + Optimistic INSERT가 정확히 1건만 통과시키는지, 두 워커가 동시에 `claimPending`을 호출해도 SKIP LOCKED로 같은 알림을 두 번 잡지 않는지를 검증합니다.
 
 ---
 
@@ -374,9 +377,10 @@ CREATE INDEX idx_stuck_reaper
 
 본 과제는 Claude Code를 적극 활용해서 개발했습니다. 다만 모든 설계 결정은 직접 검토하고 선택했으며, 설계 결정의 트레이드오프와 근거를 이해하며 진행했습니다.
 
-- **Claude 활용**: 코드 구현, 통합 테스트 작성, 트러블슈팅 진단, ADR/학습 노트 정리
+- **Claude 활용**: 코드 구현, 통합 테스트 작성(단일 스레드 + 동시성 자동 테스트 포함), 트러블슈팅 진단, ADR/학습 노트 정리, 외부 문서(README, docs/) 초안 작성
 - **직접 결정**: 모든 설계 옵션 선택 (멱등성 방식, 워커 분리, 백오프 전략, 임계값 등)
 - **개발 흐름**: 옵션과 트레이드오프를 함께 검토 → 직접 선택 → ADR로 기록 → 코드 구현 → 통합 테스트 검증
+- **동시성 자동 테스트** (`ConcurrencyIntegrationTest`): `ExecutorService` + `CountDownLatch` 패턴으로 멱등성·SKIP LOCKED 검증 시나리오 코드 작성
 
 ---
 
