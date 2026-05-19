@@ -274,6 +274,27 @@ curl -X POST http://localhost:8080/notifications \
 curl -H "X-User-Id: user-001" "http://localhost:8080/notifications/me?read=false"
 ```
 
+### `PATCH /notifications/{id}/read` — 알림 읽음 처리
+
+`X-User-Id` 헤더 필수. 본인 알림만 처리 가능 (다른 사용자 알림에 호출 시 403).
+
+```bash
+curl -X PATCH -H "X-User-Id: user-001" http://localhost:8080/notifications/{id}/read
+```
+
+응답:
+```json
+{
+  "id": "...",
+  "firstRead": true
+}
+```
+
+- `firstRead: true` — 이번 호출이 첫 읽음 처리 (read_at 세팅됨)
+- `firstRead: false` — 이미 읽음 상태였음 (멱등성)
+
+여러 기기에서 동시에 호출돼도 DB 조건부 UPDATE (`WHERE read_at IS NULL`)로 정확히 첫 호출만 read_at 세팅. 자세한 설계는 [docs/design-decisions.md](docs/design-decisions.md) 참조.
+
 ### 응답 에러 형식
 
 ```json
