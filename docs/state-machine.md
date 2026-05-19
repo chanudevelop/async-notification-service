@@ -170,6 +170,8 @@ public class Notification {
 
 EMAIL은 보통 `read_at`이 NULL로 유지됩니다 (외부 클라이언트에서 읽기 때문에 추적 불가). IN_APP은 사용자가 알림 페이지를 열거나 명시적으로 읽음 처리 시 기록됩니다.
 
+읽음 처리는 `PATCH /notifications/{id}/read` API로 호출하고, Repository에서 `UPDATE notifications SET read_at = NOW() WHERE id = ? AND read_at IS NULL` 조건부 UPDATE를 실행합니다. 여러 기기에서 동시에 호출돼도 DB row-level lock으로 직렬화되어 첫 호출만 1행 갱신, 이후는 0행 갱신으로 처리. 응답의 `firstRead` 필드로 클라이언트가 식별 가능.
+
 → 자세한 근거는 [design-decisions.md](./design-decisions.md) 참조.
 
 ---

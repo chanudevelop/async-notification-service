@@ -152,5 +152,34 @@ GET {{host}}/notifications/me
 
 
 ###
+### [선택구현] 알림 읽음 처리 — 첫 호출
+### 기대 응답: 200 + {"firstRead": true}
+### 알림 ID는 위 등록 응답에서 받은 id로 교체
+PATCH {{host}}/notifications/REPLACE-WITH-NOTIFICATION-ID/read
+X-User-Id: user-001
+
+
+###
+### [선택구현] 알림 읽음 처리 — 두 번째 호출 (멱등성 확인)
+### 기대 응답: 200 + {"firstRead": false}
+PATCH {{host}}/notifications/REPLACE-WITH-NOTIFICATION-ID/read
+X-User-Id: user-001
+
+
+###
+### [선택구현] 다른 사용자가 읽음 처리 시도
+### 기대 응답: 403 + NOTIFICATION_ACCESS_DENIED
+PATCH {{host}}/notifications/REPLACE-WITH-NOTIFICATION-ID/read
+X-User-Id: user-attacker
+
+
+###
+### [선택구현] 존재하지 않는 알림 읽음 처리
+### 기대 응답: 404 + NOTIFICATION_NOT_FOUND
+PATCH {{host}}/notifications/00000000-0000-0000-0000-000000000000/read
+X-User-Id: user-001
+
+
+###
 ### Swagger UI
 ### 브라우저에서: http://localhost:8080/swagger-ui.html
