@@ -114,7 +114,7 @@ curl http://localhost:8080/actuator/health
 ./gradlew test
 ```
 
-Testcontainers가 PostgreSQL 16 컨테이너를 자동으로 띄워 통합 테스트 40개를 돌립니다.
+Testcontainers가 PostgreSQL 16 컨테이너를 자동으로 띄워 통합 테스트 45개를 돌립니다.
 
 ---
 
@@ -223,6 +223,10 @@ Jitter는 동시에 실패한 다수 알림이 같은 시각에 재시도되어 
 워커 프로세스가 PENDING을 PROCESSING으로 잡은 직후 죽으면 그 알림이 영원히 갇힙니다. `StuckReaperProcessor`가 1분마다 `claimed_at`이 5분 이상 지난 PROCESSING을 발견해 `recoverFromStuck`으로 PENDING 복구. 다음 발송 워커가 다시 잡아서 재처리.
 
 복구 시 `retry_count`는 건드리지 않습니다. Stuck은 인프라 사고지 외부 시스템 사고가 아니라, retry_count 증가시키면 인프라가 불안정한 시기에 stuck이 누적되다 DEAD_LETTER로 보내져 외부 시스템 한 번도 거치지 않은 알림이 영구 실패 처리되는 사고가 나기 때문입니다.
+
+### 7. 동시 읽음 처리(선택구현)
+읽음 API를 여러 기기에서 동시에 읽음 처리 요청이 와도, 조건부 `UPDATE notifications SET read_at = NOW() WHERE id = ? AND read_at IS NULL`
+ 를 사용하여 DB가 같은 row에 대해 lock을 잡고 원자적으로 처리하여 먼저 처리된 요청만 read_at을 세팅해 1행이 갱신되고, 이후 요청은 조건이 맞지 않아 0행 갱신되도록 설계하였습니다.
 
 ### 세 워커가 어떻게 충돌 안 하나
 
@@ -333,14 +337,14 @@ CREATE INDEX idx_stuck_reaper
 ./gradlew test
 ```
 
-통합 테스트 **40개** 모두 통과:
+통합 테스트 **45개** 모두 통과:
 - Application bootstrap (1)
-- 알림 등록 API + 멱등성 (7)
+- 알림 등록 API + 멱등성 (11)
 - 조회 API + 비즈니스 룰 (14)
 - 발송 워커 (6)
 - 재시도 + DEAD_LETTER (5)
 - Stuck Reaper (5)
-- **동시성 자동 검증** (2) — 멱등성 100 동시 요청 + SKIP LOCKED 다중 워커 클레임
+- **동시성 자동 검증** (3) — 멱등성 100 동시 요청, SKIP LOCKED 다중 워커 클레임, 읽음 멱등성
 
 모든 통합 테스트는 Testcontainers로 실제 PostgreSQL 16 컨테이너에서 실행됩니다. H2 in-memory 대신 실제 DB를 쓰는 이유는 Partial Index, `SKIP LOCKED`, JSONB 같은 PostgreSQL 특화 기능이 운영과 동일하게 동작하는지 검증해야 하기 때문입니다.
 
@@ -350,18 +354,17 @@ CREATE INDEX idx_stuck_reaper
 
 ## 미구현 / 제약사항
 
-### 선택 구현 항목 (시간 부족으로 보류)
+### 미구현
+- **선택 구현 항목(1) - 발송 스케줄링: 특정 시각에 발송 예약 기능
+- **선택 구현 항목(3) - 최종 실패 알림 보관 및 수동 재시도
 
-- **DEAD_LETTER 수동 재시도 API** — 도메인 메서드 `manualRetry()`는 준비됨. API 엔드포인트만 추가하면 완성.
-- **발송 스케줄링** (특정 시각 예약) — `next_attempt_at` 컬럼이 이미 있어 단순 API 추가만 필요.
-- **읽음 처리 동시성 시나리오** — `markAsRead()`가 멱등성 있음 (이미 readAt 있으면 변경 X). 별도 동시성 테스트는 미작성.
-- **알림 템플릿 관리 API** — 시드 데이터로만 제공. 운영 환경 추가 시 별도 admin API 필요.
+### 일부 구현
+- **선택 구현 항목(2) - 알림 템플릿 관리 (타입별 메시지 템플릿): notification_template으로 알림 타입 별 메시지 템플릿을 관리하고 사용하고 있다. 하지만 이를 관리자가 관리하는 API는 시간 상 구현하지 못하여 일부구현으로 판단
 
 ### 의도적 단순화
 
 - **인증** — JWT/SecurityContext 대신 `X-User-Id` 헤더로 간략화. 실제 운영은 인증 미들웨어 필요.
 - **외부 발송** — SMTP / FCM / APNs는 Mock(콘솔 로그)으로 대체. Dispatcher 인터페이스 그대로 실제 클라이언트로 교체 가능한 구조.
-- **locale 다국어** — `ko_KR` 단일. 사용자별 locale은 시드 데이터 구조상 확장 여지만 마련.
 - **모니터링/메트릭** — Actuator 기본 헬스체크만. 
 
 ### 운영 환경 전환 시 변경 포인트

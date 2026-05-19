@@ -4,6 +4,7 @@ import com.chanudevelop.notification.domain.Notification;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -89,6 +90,30 @@ public interface NotificationRepository extends JpaRepository<Notification, UUID
             @Param("threshold") LocalDateTime threshold,
             @Param("batchSize") int batchSize
     );
+
+    /**
+     * 읽음 처리 조건부 UPDATE — 여러 기기 동시 호출 안전.
+     *
+     * <p>{@code WHERE read_at IS NULL} 조건이 핵심. DB가 첫 호출만 1행 갱신하고
+     * 이후 동시 호출은 0행 갱신으로 자연스럽게 차단된다. 알림 등록 멱등성의
+     * DB UNIQUE 제약과 같은 "DB가 단일 진실 원천" 패턴.
+     *
+     * <p>자바 메모리에서 {@code if (readAt == null)} 검사하는 방식은 동시 환경에서
+     * 두 스레드가 모두 통과해 readAt이 last-writer-wins로 덮이지만, 본 메서드는
+     * DB 차원에서 정확히 첫 호출만 통과시킴.
+     *
+     * @param id 알림 ID
+     * @param now 읽음 처리 시각
+     * @return 갱신된 행 수 (1 = 이번 호출이 첫 읽음, 0 = 이미 읽었거나 알림 없음)
+     */
+    @Modifying
+    @Query("""
+            UPDATE Notification n
+               SET n.readAt = :now
+             WHERE n.id = :id
+               AND n.readAt IS NULL
+            """)
+    int markAsReadIfUnread(@Param("id") UUID id, @Param("now") LocalDateTime now);
 
     /**
      * 사용자가 받은 IN_APP 알림 목록 조회 (비즈니스 룰: SENT + IN_APP, ADR-011).

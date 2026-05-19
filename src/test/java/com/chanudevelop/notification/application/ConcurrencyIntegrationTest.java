@@ -2,6 +2,7 @@ package com.chanudevelop.notification.application;
 
 import com.chanudevelop.notification.NotificationApplication;
 import com.chanudevelop.notification.TestcontainersConfiguration;
+import com.chanudevelop.notification.application.dto.MarkAsReadResponse;
 import com.chanudevelop.notification.application.dto.NotificationCreateRequest;
 import com.chanudevelop.notification.application.dto.NotificationResponse;
 import com.chanudevelop.notification.domain.Notification;
@@ -34,10 +35,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * 동시성 시나리오 자동 검증 (Phase 9).
  *
- * <p>본 프로젝트의 동시성 안전 메커니즘 두 가지를 실제로 여러 스레드를 띄워 검증한다.
+ * <p>본 프로젝트의 동시성 안전 메커니즘 세 가지를 실제로 여러 스레드를 띄워 검증한다.
  * <ul>
  *   <li>9-3 멱등성 동시성: 같은 키 100건 동시 등록 → DB UNIQUE 제약 + Optimistic INSERT가 1건만 통과</li>
  *   <li>9-4 클레임 동시성: 두 워커가 동시에 claimPending → SKIP LOCKED로 겹치지 않게 분할</li>
+ *   <li>읽음 처리 동시성: 같은 알림에 100개 스레드 동시 markAsRead → DB 조건부 UPDATE로 정확히 1번만 firstRead=true</li>
  * </ul>
  *
  * <p>다른 통합 테스트는 단일 스레드 시나리오만 검증한다. 본 클래스는 멱등성/SKIP LOCKED가
@@ -182,6 +184,60 @@ class ConcurrencyIntegrationTest {
             assertThat(reloaded.getStatus()).isEqualTo(NotificationStatus.PROCESSING);
             assertThat(reloaded.getWorkerId()).isIn("worker-A", "worker-B");
         }
+    }
+
+    @Test
+    @DisplayName("같은 알림에 100개 스레드가 동시에 markAsRead를 호출해도 DB 조건부 UPDATE로 정확히 1번만 firstRead=true가 된다")
+    void markAsRead_under_concurrent_requests() throws Exception {
+        // 사용자 본인의 알림 1건 준비
+        Notification target = Notification.create(
+                "user-read-concurrent",
+                NotificationType.ENROLLMENT_COMPLETED,
+                NotificationChannel.IN_APP,
+                "read-concurrent-001",
+                Map.of("studentName", "동시읽음", "courseName", "테스트")
+        );
+        notificationRepository.saveAndFlush(target);
+
+        int threadCount = 100;
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch doneLatch = new CountDownLatch(threadCount);
+        ConcurrentLinkedQueue<MarkAsReadResponse> responses = new ConcurrentLinkedQueue<>();
+        AtomicInteger failureCount = new AtomicInteger();
+
+        for (int i = 0; i < threadCount; i++) {
+            executor.submit(() -> {
+                try {
+                    startLatch.await();
+                    MarkAsReadResponse res = notificationService.markAsRead(
+                            target.getId(), "user-read-concurrent");
+                    responses.add(res);
+                } catch (Exception e) {
+                    failureCount.incrementAndGet();
+                } finally {
+                    doneLatch.countDown();
+                }
+            });
+        }
+
+        startLatch.countDown();
+        boolean finished = doneLatch.await(30, TimeUnit.SECONDS);
+        executor.shutdown();
+
+        assertThat(finished).as("100개 스레드 모두 30초 안에 완료").isTrue();
+        assertThat(failureCount.get()).as("어떤 요청도 예외로 끝나지 않아야 한다").isZero();
+        assertThat(responses).hasSize(threadCount);
+
+        // 핵심 검증: firstRead=true가 정확히 1건, 나머지 99건은 false
+        long firstReadTrue = responses.stream().filter(MarkAsReadResponse::firstRead).count();
+        long firstReadFalse = responses.stream().filter(r -> !r.firstRead()).count();
+        assertThat(firstReadTrue).isEqualTo(1);
+        assertThat(firstReadFalse).isEqualTo(threadCount - 1);
+
+        // DB에 readAt이 정확히 1번 세팅됨 (last-writer-wins 패턴이 아닌 조건부 UPDATE 검증)
+        Notification reloaded = notificationRepository.findById(target.getId()).orElseThrow();
+        assertThat(reloaded.getReadAt()).isNotNull();
     }
 
     private List<UUID> insertPendingNotifications(int count) {

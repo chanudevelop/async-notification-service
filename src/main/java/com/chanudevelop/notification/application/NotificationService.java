@@ -1,11 +1,13 @@
 package com.chanudevelop.notification.application;
 
+import com.chanudevelop.notification.application.dto.MarkAsReadResponse;
 import com.chanudevelop.notification.application.dto.NotificationCreateRequest;
 import com.chanudevelop.notification.application.dto.NotificationDetailResponse;
 import com.chanudevelop.notification.application.dto.NotificationListItem;
 import com.chanudevelop.notification.application.dto.NotificationResponse;
 import com.chanudevelop.notification.application.dto.PageResponse;
 import com.chanudevelop.notification.domain.Notification;
+import com.chanudevelop.notification.domain.exception.NotificationAccessDeniedException;
 import com.chanudevelop.notification.domain.exception.NotificationNotFoundException;
 import com.chanudevelop.notification.infrastructure.persistence.NotificationRepository;
 import lombok.RequiredArgsConstructor;
@@ -16,6 +18,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDateTime;
 import java.util.UUID;
 
 @Slf4j
@@ -96,5 +99,36 @@ public class NotificationService {
         Page<Notification> page = notificationRepository
                 .findReceivedInAppByRecipient(recipientId, read, pageable);
         return PageResponse.of(page, NotificationListItem::of);
+    }
+
+    /**
+     * 본인 알림 읽음 처리 — 여러 기기 동시 호출 안전.
+     *
+     * <p>흐름:
+     * <ol>
+     *   <li>알림 존재 + 본인 소유 확인 (404 / 403)</li>
+     *   <li>DB 조건부 UPDATE {@code WHERE read_at IS NULL} 호출 — 첫 호출만 1행, 이후 0행</li>
+     *   <li>응답에 firstRead 반환 — 클라이언트가 "안 읽음 카운트 감소" 같은 후속 처리에 활용</li>
+     * </ol>
+     *
+     * <p>여러 기기에서 동시에 호출돼도 DB 조건부 UPDATE가 단일 진실 원천이라
+     * 정확히 첫 호출만 readAt 세팅. 알림 등록 멱등성(DB UNIQUE)과 같은 패턴.
+     *
+     * @throws NotificationNotFoundException 알림이 없을 때
+     * @throws NotificationAccessDeniedException 다른 사용자의 알림을 읽으려 할 때
+     */
+    @Transactional
+    public MarkAsReadResponse markAsRead(UUID id, String userId) {
+        Notification notification = notificationRepository.findById(id)
+                .orElseThrow(() -> new NotificationNotFoundException(id));
+
+        if (!notification.getRecipientId().equals(userId)) {
+            throw new NotificationAccessDeniedException(id, userId);
+        }
+
+        int updated = notificationRepository.markAsReadIfUnread(id, LocalDateTime.now());
+        boolean firstRead = (updated == 1);
+        log.debug("markAsRead: id={}, userId={}, firstRead={}", id, userId, firstRead);
+        return new MarkAsReadResponse(id, firstRead);
     }
 }
